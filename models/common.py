@@ -17,6 +17,8 @@ from utils.general import non_max_suppression, make_divisible, scale_coords, inc
 from utils.plots import color_list, plot_one_box
 from utils.torch_utils import time_synchronized
 
+# MODIFICATION: Enable Mish Activation Funmction Replacement:
+ENABLE_MISH_MOD = True
 
 ##### basic ####
 
@@ -102,7 +104,10 @@ class Conv(nn.Module):
         super(Conv, self).__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False)
         self.bn = nn.BatchNorm2d(c2)
-        self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+        if ENABLE_MISH_MOD:
+            self.act = Mish() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+        else:
+            self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
 
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
@@ -2017,3 +2022,9 @@ class ST2CSPC(nn.Module):
         return self.cv4(torch.cat((y1, y2), dim=1))
 
 ##### end of swin transformer v2 #####   
+
+# MODIFICATION: Use Mish Activation Function instead of leaky ReLU
+class Mish(nn.Module):
+    """Mish Activation Function"""
+    def forward(self, x):
+        return x * torch.tanh(F.softplus(x))
