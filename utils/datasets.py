@@ -30,6 +30,9 @@ from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, 
     resample_segments, clean_str
 from utils.torch_utils import torch_distributed_zero_first
 
+# MODIFICATIONS ENABLE
+ENABLE_CUTMIX_MOD = True
+
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng', 'webp', 'mpo']  # acceptable image suffixes
@@ -577,6 +580,13 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
             
+            # MODIFICATION: Use Cutmix in data augmentation
+            # Apply CutMix augmentation with a 50% probability
+            if ENABLE_CUTMIX_MOD:
+                if random.random() < 0.5:  # Adjust the probability as needed
+                    second_index = random.randint(0, len(self.labels) - 1)  # Get a random second image index
+                    second_img, second_labels = load_image(self, second_index)  # Load the second image and labels
+                    img, labels = cutmix(img, labels, second_img, second_labels, beta=1.0)  # Apply CutMix
             
             #img, labels = self.albumentations(img, labels)
 
@@ -1318,3 +1328,40 @@ def load_segmentations(self, index):
     #print(key)
     # /work/handsomejw66/coco17/
     return self.segs[key]
+
+
+# MODIFICATION: Introduce CutMix data augmentation
+def cutmix(image, label, second_image, second_label, beta=1.0):
+    """
+    Apply CutMix augmentation.
+
+    Args:
+        image (ndarray): The first image.
+        label (ndarray): Labels corresponding to the first image.
+        second_image (ndarray): The second image to mix with.
+        second_label (ndarray): Labels corresponding to the second image.
+        beta (float): The Beta distribution parameter for mixing ratio.
+
+    Returns:
+        mixed_image (ndarray): The augmented image with parts from both images.
+        mixed_label (ndarray): Combined labels for both images.
+    """
+    # Sample the mixing ratio lambda from Beta distribution
+    lam = np.random.beta(beta, beta)
+    h, w = image.shape[:2]  # Get height and width of the image
+    cx, cy = np.random.randint(w), np.random.randint(h)  # Random center point for the cut region
+
+    # Calculate the cut region (bounding box)
+    bbx1 = np.clip(cx - int(w * np.sqrt(1 - lam)), 0, w)
+    bby1 = np.clip(cy - int(h * np.sqrt(1 - lam)), 0, h)
+    bbx2 = np.clip(cx + int(w * np.sqrt(1 - lam)), 0, w)
+    bby2 = np.clip(cy + int(h * np.sqrt(1 - lam)), 0, h)
+
+    # Mix the images by pasting the cut region from the second image onto the first
+    mixed_image = image.copy()
+    mixed_image[bby1:bby2, bbx1:bbx2, :] = second_image[bby1:bby2, bbx1:bbx2, :]
+
+    # Combine the labels for both images
+    mixed_label = np.vstack((label, second_label))
+
+    return mixed_image, mixed_label
