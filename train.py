@@ -425,6 +425,13 @@ def train(hyp, opt, device, tb_writer=None):
                                                  compute_loss=compute_loss,
                                                  is_coco=is_coco,
                                                  v5_metric=opt.v5_metric)
+                if tb_writer:
+                    tb_writer.add_scalar("Validation/Loss", results[4] + results[5] + results[6], epoch)
+                    tb_writer.add_scalar("Validation/Accuracy", results[0], epoch)  # Precision as a proxy for accuracy
+                    tb_writer.add_scalar("Validation/Precision", results[0], epoch)
+                    tb_writer.add_scalar("Validation/Recall", results[1], epoch)
+                    tb_writer.add_scalar("Validation/mAP_0.5", results[2], epoch)
+                    tb_writer.add_scalar("Validation/mAP_0.5_0.95", results[3], epoch)
 
             # Write
             with open(results_file, 'a') as f:
