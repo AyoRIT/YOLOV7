@@ -31,7 +31,7 @@ from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, 
 from utils.torch_utils import torch_distributed_zero_first
 
 # MODIFICATIONS ENABLE
-ENABLE_CUTMIX_MOD = True
+ENABLE_CUTMIX_MOD = False
 
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
