@@ -1333,35 +1333,77 @@ def load_segmentations(self, index):
 # MODIFICATION: Introduce CutMix data augmentation
 def cutmix(image, label, second_image, second_label, beta=1.0):
     """
-    Apply CutMix augmentation.
-
+    Apply CutMix augmentation with proper label adjustment for polygon labels.
     Args:
         image (ndarray): The first image.
-        label (ndarray): Labels corresponding to the first image.
+        label (list): Labels corresponding to the first image (polygons).
         second_image (ndarray): The second image to mix with.
-        second_label (ndarray): Labels corresponding to the second image.
+        second_label (list): Labels corresponding to the second image (polygons).
         beta (float): The Beta distribution parameter for mixing ratio.
 
     Returns:
         mixed_image (ndarray): The augmented image with parts from both images.
-        mixed_label (ndarray): Combined labels for both images.
+        mixed_label (list): Adjusted labels for the mixed image.
     """
-    # Sample the mixing ratio lambda from Beta distribution
-    lam = np.random.beta(beta, beta)
-    h, w = image.shape[:2]  # Get height and width of the image
-    cx, cy = np.random.randint(w), np.random.randint(h)  # Random center point for the cut region
+    # Resize second_image to match image dimensions
+    h, w = image.shape[:2]
+    second_image = cv2.resize(second_image, (w, h))  # Resize to (width, height)
 
-    # Calculate the cut region (bounding box)
+    lam = np.random.beta(beta, beta)
+
+    # Random center point for the CutMix region
+    cx, cy = np.random.randint(w), np.random.randint(h)
+
+    # Calculate the CutMix bounding box
     bbx1 = np.clip(cx - int(w * np.sqrt(1 - lam)), 0, w)
     bby1 = np.clip(cy - int(h * np.sqrt(1 - lam)), 0, h)
     bbx2 = np.clip(cx + int(w * np.sqrt(1 - lam)), 0, w)
     bby2 = np.clip(cy + int(h * np.sqrt(1 - lam)), 0, h)
 
-    # Mix the images by pasting the cut region from the second image onto the first
+    # Mix the images
     mixed_image = image.copy()
     mixed_image[bby1:bby2, bbx1:bbx2, :] = second_image[bby1:bby2, bbx1:bbx2, :]
 
-    # Combine the labels for both images
-    mixed_label = np.vstack((label, second_label))
+    # Adjust labels for both images
+    mixed_label = []
+
+    # Retain labels from the first image
+    for obj in label:
+        class_id = obj[0]
+        polygon = np.array(obj[1:]).reshape(-1, 2)
+
+        # Compute bounding box
+        x_min, y_min = polygon.min(axis=0)
+        x_max, y_max = polygon.max(axis=0)
+
+        # Check if the bounding box is outside the CutMix region
+        if x_max < bbx1 / w or x_min > bbx2 / w or y_max < bby1 / h or y_min > bby2 / h:
+            mixed_label.append(obj)
+
+    # Adjust and retain labels from the second image
+    for obj in second_label:
+        class_id = obj[0]
+        polygon = np.array(obj[1:]).reshape(-1, 2)
+
+        # Compute bounding box
+        x_min, y_min = polygon.min(axis=0)
+        x_max, y_max = polygon.max(axis=0)
+
+        # Clip bounding box coordinates to the CutMix region
+        x_min = max(x_min, bbx1 / w)
+        x_max = min(x_max, bbx2 / w)
+        y_min = max(y_min, bby1 / h)
+        y_max = min(y_max, bby2 / h)
+
+        if x_min < x_max and y_min < y_max:  # If the bounding box is valid
+            new_polygon = polygon.copy()
+
+            # Clip polygon coordinates to the CutMix region
+            new_polygon[:, 0] = np.clip(new_polygon[:, 0], bbx1 / w, bbx2 / w)
+            new_polygon[:, 1] = np.clip(new_polygon[:, 1], bby1 / h, bby2 / h)
+
+            # Flatten the polygon and append the class ID
+            flattened_polygon = new_polygon.flatten().tolist()
+            mixed_label.append([class_id] + flattened_polygon)
 
     return mixed_image, mixed_label
