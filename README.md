@@ -38,7 +38,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 ## Step 3: Setting Up the Dataset
 1. **COCO-mini Dataset Setup**:
    - For ease of use, a mini subset of COCO has already been prepared for your convenience. This subset includes approximately 500 training images and 50 validation images, along with a small set of test images.
-   - IMPORTANT: Using this heavily reduced dataset will not produce replicated results from our presentation. This dataset is used just as a portable proof of concept in terms of being able top train.
+   - IMPORTANT: Using this heavily reduced dataset will not produce replicated results from our presentation. This dataset is used just as a portable proof of concept in terms of being able top train. Training the model from scratch over just 500 images will produce near 0% accuracy. This is expected as a much larger dataset over hundreds of epochs is needed for better accuracy.
    - Ensure that the following directory structure exists under `coco_mini/`:
 
      ```

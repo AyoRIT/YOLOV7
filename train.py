@@ -190,182 +190,179 @@ def train(hyp, opt, device, tb_writer=None):
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # Adjust weight decay
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
-    pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
+    # Create parameter groups for the optimizer
+    pg0, pg1, pg2 = [], [], []  # Separate groups for biases, BatchNorm weights, and other weights
     for k, v in model.named_modules():
         if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
-            pg2.append(v.bias)  # biases
+            pg2.append(v.bias)  # Add biases to pg2
         if isinstance(v, nn.BatchNorm2d):
-            pg0.append(v.weight)  # no decay
+            pg0.append(v.weight)  # Add BatchNorm weights to pg0 (no decay)
         elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
-            pg1.append(v.weight)  # apply decay
+            pg1.append(v.weight)  # Add other weights to pg1 (apply decay)
+
+        # Handle specific layers with implicit parameters
         if hasattr(v, 'im'):
-            if hasattr(v.im, 'implicit'):           
+            if hasattr(v.im, 'implicit'):
                 pg0.append(v.im.implicit)
             else:
                 for iv in v.im:
                     pg0.append(iv.implicit)
         if hasattr(v, 'imc'):
-            if hasattr(v.imc, 'implicit'):           
+            if hasattr(v.imc, 'implicit'):
                 pg0.append(v.imc.implicit)
             else:
                 for iv in v.imc:
                     pg0.append(iv.implicit)
         if hasattr(v, 'imb'):
-            if hasattr(v.imb, 'implicit'):           
+            if hasattr(v.imb, 'implicit'):
                 pg0.append(v.imb.implicit)
             else:
                 for iv in v.imb:
                     pg0.append(iv.implicit)
         if hasattr(v, 'imo'):
-            if hasattr(v.imo, 'implicit'):           
+            if hasattr(v.imo, 'implicit'):
                 pg0.append(v.imo.implicit)
             else:
                 for iv in v.imo:
                     pg0.append(iv.implicit)
         if hasattr(v, 'ia'):
-            if hasattr(v.ia, 'implicit'):           
+            if hasattr(v.ia, 'implicit'):
                 pg0.append(v.ia.implicit)
             else:
                 for iv in v.ia:
                     pg0.append(iv.implicit)
+
+        # Handle attention layers
         if hasattr(v, 'attn'):
-            if hasattr(v.attn, 'logit_scale'):   
+            if hasattr(v.attn, 'logit_scale'):
                 pg0.append(v.attn.logit_scale)
-            if hasattr(v.attn, 'q_bias'):   
+            if hasattr(v.attn, 'q_bias'):
                 pg0.append(v.attn.q_bias)
-            if hasattr(v.attn, 'v_bias'):  
+            if hasattr(v.attn, 'v_bias'):
                 pg0.append(v.attn.v_bias)
-            if hasattr(v.attn, 'relative_position_bias_table'):  
+            if hasattr(v.attn, 'relative_position_bias_table'):
                 pg0.append(v.attn.relative_position_bias_table)
+
+        # Handle reparameterized bottleneck layers
         if hasattr(v, 'rbr_dense'):
-            if hasattr(v.rbr_dense, 'weight_rbr_origin'):  
+            if hasattr(v.rbr_dense, 'weight_rbr_origin'):
                 pg0.append(v.rbr_dense.weight_rbr_origin)
-            if hasattr(v.rbr_dense, 'weight_rbr_avg_conv'): 
+            if hasattr(v.rbr_dense, 'weight_rbr_avg_conv'):
                 pg0.append(v.rbr_dense.weight_rbr_avg_conv)
-            if hasattr(v.rbr_dense, 'weight_rbr_pfir_conv'):  
+            if hasattr(v.rbr_dense, 'weight_rbr_pfir_conv'):
                 pg0.append(v.rbr_dense.weight_rbr_pfir_conv)
-            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_idconv1'): 
+            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_idconv1'):
                 pg0.append(v.rbr_dense.weight_rbr_1x1_kxk_idconv1)
-            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_conv2'):   
+            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_conv2'):
                 pg0.append(v.rbr_dense.weight_rbr_1x1_kxk_conv2)
-            if hasattr(v.rbr_dense, 'weight_rbr_gconv_dw'):   
+            if hasattr(v.rbr_dense, 'weight_rbr_gconv_dw'):
                 pg0.append(v.rbr_dense.weight_rbr_gconv_dw)
-            if hasattr(v.rbr_dense, 'weight_rbr_gconv_pw'):   
+            if hasattr(v.rbr_dense, 'weight_rbr_gconv_pw'):
                 pg0.append(v.rbr_dense.weight_rbr_gconv_pw)
-            if hasattr(v.rbr_dense, 'vector'):   
+            if hasattr(v.rbr_dense, 'vector'):
                 pg0.append(v.rbr_dense.vector)
 
+    # Select optimizer (Adam or SGD) and configure its parameters
     if opt.adam:
-        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
+        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))
     else:
         optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
-    optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
-    optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
-    logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
-    del pg0, pg1, pg2
+    # Add other parameter groups to the optimizer
+    optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # Add pg1 (with weight decay)
+    optimizer.add_param_group({'params': pg2})  # Add pg2 (biases without weight decay)
+    logger.info(f'Optimizer groups: {len(pg2)} .bias, {len(pg1)} conv.weight, {len(pg0)} other')
 
-    # Scheduler https://arxiv.org/pdf/1812.01187.pdf
-    # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
+    # Learning rate scheduler setup
     if opt.linear_lr:
-        lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
+        lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # Linear scheduler
     else:
-        lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
+        lf = one_cycle(1, hyp['lrf'], epochs)  # Cosine scheduler
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
-    # plot_lr_scheduler(optimizer, scheduler, epochs)
 
-    # EMA
+    # Exponential Moving Average (EMA) for model weights
     ema = ModelEMA(model) if rank in [-1, 0] else None
 
-    # Resume
+    # Resume training from a checkpoint if provided
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
-        # Optimizer
-        if ckpt['optimizer'] is not None:
-            optimizer.load_state_dict(ckpt['optimizer'])
-            best_fitness = ckpt['best_fitness']
+        if ckpt.get('optimizer') is not None:
+            optimizer.load_state_dict(ckpt['optimizer'])  # Load optimizer state
+            best_fitness = ckpt['best_fitness']  # Restore best fitness value
 
-        # EMA
+        # Resume EMA state
         if ema and ckpt.get('ema'):
             ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
             ema.updates = ckpt['updates']
 
-        # Results
+        # Restore results and epochs
         if ckpt.get('training_results') is not None:
-            results_file.write_text(ckpt['training_results'])  # write results.txt
-
-        # Epochs
+            results_file.write_text(ckpt['training_results'])  # Restore training results
         start_epoch = ckpt['epoch'] + 1
         if opt.resume:
-            assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
+            assert start_epoch > 0, f"{weights} training to {epochs} epochs is finished, nothing to resume."
+
         if epochs < start_epoch:
-            logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
-                        (weights, ckpt['epoch'], epochs))
-            epochs += ckpt['epoch']  # finetune additional epochs
+            logger.info(f"{weights} has been trained for {ckpt['epoch']} epochs. Fine-tuning for {epochs} additional epochs.")
+            epochs += ckpt['epoch']
 
-        del ckpt, state_dict
+    # Set image sizes and grid sizes
+    gs = max(int(model.stride.max()), 32)  # Maximum stride for the model
+    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # Ensure image sizes are multiples of gs
 
-    # Image sizes
-    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
-    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
-
-    # DP mode
+    # Enable multi-GPU training (DataParallel mode) if applicable
     if cuda and rank == -1 and torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
 
-    # SyncBatchNorm
+    # Enable synchronized BatchNorm if specified
     if opt.sync_bn and cuda and rank != -1:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
         logger.info('Using SyncBatchNorm()')
 
-    # Trainloader
+
+    # DataLoader for training
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
-    nb = len(dataloader)  # number of batches
-    assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
+    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # Max label class
+    nb = len(dataloader)  # Number of batches
+    assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {opt.data}.'
 
-    # Process 0
+    # Main process setups (rank -1 or 0)
     if rank in [-1, 0]:
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
+        # Validation DataLoader
+        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,
                                        hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
                                        world_size=opt.world_size, workers=opt.workers,
                                        pad=0.5, prefix=colorstr('val: '))[0]
-
+        # Plot and analyze labels
         if not opt.resume:
             labels = np.concatenate(dataset.labels, 0)
-            c = torch.tensor(labels[:, 0])  # classes
-            # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
-            # model._initialize_biases(cf.to(device))
+            c = torch.tensor(labels[:, 0])  # Classes
             if plots:
-                #plot_labels(labels, names, save_dir, loggers)
                 if tb_writer:
-                    tb_writer.add_histogram('classes', c, 0)
-
-            # Anchors
+                    tb_writer.add_histogram('classes', c, 0)  # Log class histogram
+            # Anchor checking and adjustment
             if not opt.noautoanchor:
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # pre-reduce anchor precision
+            model.half().float()  # Reduce anchor precision
 
-    # DDP mode
+    # DistributedDataParallel (DDP) mode for distributed training
     if cuda and rank != -1:
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
-                    # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
                     find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
 
-    # Model parameters
-    hyp['box'] *= 3. / nl  # scale to layers
-    hyp['cls'] *= nc / 80. * 3. / nl  # scale to classes and layers
-    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / nl  # scale to image size and layers
-    hyp['label_smoothing'] = opt.label_smoothing
-    model.nc = nc  # attach number of classes to model
-    model.hyp = hyp  # attach hyperparameters to model
-    model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
-    model.names = names
+    # Update model parameters
+    hyp['box'] *= 3. / model.model[-1].nl  # Adjust box loss scale
+    hyp['cls'] *= nc / 80. * 3. / model.model[-1].nl  # Adjust class loss scale
+    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / model.model[-1].nl  # Adjust object loss scale
+    hyp['label_smoothing'] = opt.label_smoothing  # Set label smoothing
+    model.nc = nc  # Number of classes
+    model.hyp = hyp  # Attach hyperparameters
+    model.gr = 1.0  # Set IoU loss ratio
+    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # Set class weights
+    model.names = names  # Attach class names
 
     # Start training
     t0 = time.time()
