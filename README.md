@@ -14,7 +14,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 1. Clone the YOLOv7 repository:
    ```bash
    git clone https://github.com/AyoRIT/YOLOV7.git
-   cd yolov7
+   cd YOLOV7
    ```
 
 2. Ensure that all files have been downloaded, including the `test.py`, `train.py`, and configuration files.
