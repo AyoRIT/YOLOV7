@@ -58,18 +58,17 @@ This guide provides step-by-step instructions for setting up and running our mod
 ---
 
 ## Step 4: Running `test.py` with Pretrained Weights
-1. A checkpoint containing the pretrained weights for the original YOLOv7 model has already been provided under `ML_Project_Code/checkpoints/`. Ensure that the file `yolov7.pt` exists in this directory. If the file is missing, download it manually from the official YOLOv7 repository.
+1. A checkpoint containing the pretrained weights for the original YOLOv7 model has already been provided under `checkpoints/`. Ensure that the file `yolov7.pt` exists in this directory. If the file is missing, download it manually from the official YOLOv7 repository.
 
    Ensure the following directory structure:
    ```
-   ML_Project_Code/
-   ├── checkpoints/
-   │   └── yolov7.pt
+   checkpoints/
+   └── yolov7.pt
    ```
 
 2. Run `test.py` to evaluate the model using the provided pretrained weights:
    ```bash
-   python test.py --data data/coco.yaml --img 640 --batch 16 --conf 0.001 --iou 0.65 --device 0 --weights ML_Project_Code/checkpoints/yolov7.pt --name yolov7_eval
+   python test.py --data data/coco.yaml --img 640 --batch 16 --conf 0.001 --iou 0.65 --device 0 --weights checkpoints/yolov7.pt --name yolov7_eval
    ```
 
 ---

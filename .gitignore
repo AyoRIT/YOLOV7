@@ -269,3 +269,6 @@ fabric.properties
 # Include coco_mini images and annotations
 !coco_mini/images/**/*.jpg
 !coco_mini/annotations/*.json
+
+# Include Pretrained checkpoint
+!checkpoints/*.pt
