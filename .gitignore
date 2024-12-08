@@ -265,3 +265,7 @@ fabric.properties
 # Include ML Project Code Images
 !ML_Project_Code/**/*.jpg
 !ML_Project_Code/**/*.PNG
+
+# Include coco_mini images and annotations
+!coco_mini/images/**/*.jpg
+!coco_mini/annotations/*.json
