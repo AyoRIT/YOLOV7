@@ -76,7 +76,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 ## Step 5: Running a Training Run on Original Model From Scratch
 1. Start a training run for 1 epoch:
    ```bash
-   python train.py --workers 8 --device 0 --batch-size 8 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights '' --name yolov7_train --hyp data/hyp.scratch.p5.yaml --epochs 1
+   python train.py --workers 8 --device 0 --batch-size 8 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights checkpoints/yolov7.pt --name yolov7_train --epochs 1
    ```
 
 2. **Optional: Using the Modified Architecture**:
@@ -84,6 +84,7 @@ This guide provides step-by-step instructions for setting up and running our mod
     ```bash
     python train.py --workers 8 --device 0 --batch-size 8 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7_ML.yaml --weights '' --name yolov7_modified_train --hyp data/hyp.scratch.p5.yaml --epochs 1
      ```
+   - IMPORTANT: This training run uses a model intialized from scratch, so using a very small dataset over a small number of epochs will produce ~0% accuracy and lable preditions
 
 ---
 
