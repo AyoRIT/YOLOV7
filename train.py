@@ -91,77 +91,103 @@ logger = logging.getLogger(__name__)
 
 
 def train(hyp, opt, device, tb_writer=None):
+    """
+    Train the YOLO model with the given hyperparameters and options.
+
+    Args:
+        hyp (dict): Hyperparameter dictionary containing training configurations such as learning rate, momentum, etc.
+        opt (argparse.Namespace): Parsed command-line arguments including data paths, batch sizes, device settings, etc.
+        device (torch.device): Device (CPU or GPU) to use for training.
+        tb_writer (SummaryWriter, optional): TensorBoard writer instance for logging metrics. Defaults to None.
+
+    Returns:
+        tuple: Final training results, including precision, recall, mAP metrics, and losses.
+    """
+    # Log hyperparameters
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
+    
+    # Parse options and paths
     save_dir, epochs, batch_size, total_batch_size, weights, rank, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.freeze
 
-    # Directories
-    wdir = save_dir / 'weights'
-    wdir.mkdir(parents=True, exist_ok=True)  # make dir
-    last = wdir / 'last.pt'
-    best = wdir / 'best.pt'
-    results_file = save_dir / 'results.txt'
+    # Directories setup
+    wdir = save_dir / 'weights'  # Weight files directory
+    wdir.mkdir(parents=True, exist_ok=True)  # Ensure the directory exists
+    last = wdir / 'last.pt'  # Path for saving the last checkpoint
+    best = wdir / 'best.pt'  # Path for saving the best model
+    results_file = save_dir / 'results.txt'  # Path for training results
 
-    # Save run settings
+    # Save configuration files for reproducibility
     with open(save_dir / 'hyp.yaml', 'w') as f:
-        yaml.dump(hyp, f, sort_keys=False)
+        yaml.dump(hyp, f, sort_keys=False)  # Save hyperparameters
     with open(save_dir / 'opt.yaml', 'w') as f:
-        yaml.dump(vars(opt), f, sort_keys=False)
+        yaml.dump(vars(opt), f, sort_keys=False)  # Save options
 
-    # Configure
-    plots = not opt.evolve  # create plots
-    cuda = device.type != 'cpu'
-    init_seeds(2 + rank)
+    # Configuration settings
+    plots = not opt.evolve  # Whether to create plots during training
+    cuda = device.type != 'cpu'  # Check if CUDA is available
+    init_seeds(2 + rank)  # Set random seeds for reproducibility
+
+    # Load data configuration
     with open(opt.data) as f:
-        data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
-    is_coco = opt.data.endswith('coco.yaml')
+        data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # Parse YAML data configuration
+    is_coco = opt.data.endswith('coco.yaml')  # Check if the dataset is COCO
 
-    # Logging- Doing this before checking the dataset. Might update data_dict
-    loggers = {'wandb': None}  # loggers dict
-    if rank in [-1, 0]:
-        opt.hyp = hyp  # add hyperparameters
+    # Logging setup
+    loggers = {'wandb': None}  # Initialize loggers
+    if rank in [-1, 0]:  # Main process
+        opt.hyp = hyp  # Attach hyperparameters to options
+        # Attempt to resume training from weights
         run_id = torch.load(weights, map_location=device).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
         wandb_logger = WandbLogger(opt, Path(opt.save_dir).stem, run_id, data_dict)
-        loggers['wandb'] = wandb_logger.wandb
-        data_dict = wandb_logger.data_dict
+        loggers['wandb'] = wandb_logger.wandb  # Set up W&B logging
+        data_dict = wandb_logger.data_dict  # Update data dictionary if modified by W&B
+
+        # Update training configuration if resuming from W&B
         if wandb_logger.wandb:
-            weights, epochs, hyp = opt.weights, opt.epochs, opt.hyp  # WandbLogger might update weights, epochs if resuming
+            weights, epochs, hyp = opt.weights, opt.epochs, opt.hyp
 
-    nc = 1 if opt.single_cls else int(data_dict['nc'])  # number of classes
-    names = ['item'] if opt.single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
-    assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
+    # Number of classes
+    nc = 1 if opt.single_cls else int(data_dict['nc'])  # Single-class or multi-class
+    names = ['item'] if opt.single_cls and len(data_dict['names']) != 1 else data_dict['names']  # Class names
+    assert len(names) == nc, f'{len(names)} names found for nc={nc} dataset in {opt.data}'
 
-    # Model
-    pretrained = weights.endswith('.pt')
+    # Model initialization
+    pretrained = weights.endswith('.pt')  # Check if loading a pretrained model
     if pretrained:
-        with torch_distributed_zero_first(rank):
-            attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location=device)  # load checkpoint
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
-        state_dict = ckpt['model'].float().state_dict()  # to FP32
-        state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
-        model.load_state_dict(state_dict, strict=False)  # load
-        logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
+        # Handle pretrained weights
+        with torch_distributed_zero_first(rank):  # Ensure synchronized downloading
+            attempt_download(weights)
+        ckpt = torch.load(weights, map_location=device)  # Load checkpoint
+        # Create model with hyperparameters
+        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)
+        # Load pretrained weights into model
+        exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []
+        state_dict = intersect_dicts(ckpt['model'].float().state_dict(), model.state_dict(), exclude=exclude)
+        model.load_state_dict(state_dict, strict=False)
+        logger.info(f'Transferred {len(state_dict)}/{len(model.state_dict())} items from {weights}')
     else:
-        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-    with torch_distributed_zero_first(rank):
-        check_dataset(data_dict)  # check
-    train_path = data_dict['train']
-    test_path = data_dict['val']
+        # Initialize a new model
+        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)
 
-    # Freeze
-    freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # parameter names to freeze (full or partial)
+    # Ensure the dataset is valid
+    with torch_distributed_zero_first(rank):
+        check_dataset(data_dict)
+    train_path = data_dict['train']  # Training data path
+    test_path = data_dict['val']  # Validation data path
+
+    # Freezing specified layers
+    freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]
     for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
+        v.requires_grad = True  # Enable training for all layers
         if any(x in k for x in freeze):
-            print('freezing %s' % k)
+            print(f'freezing {k}')  # Freeze specific layers
             v.requires_grad = False
 
-    # Optimizer
-    nbs = 64  # nominal batch size
-    accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
-    hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
+    # Initialize optimizer
+    nbs = 64  # Nominal batch size
+    accumulate = max(round(nbs / total_batch_size), 1)  # Accumulate loss for larger batches
+    hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # Adjust weight decay
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
     pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
