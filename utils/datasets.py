@@ -30,8 +30,6 @@ from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, 
     resample_segments, clean_str
 from utils.torch_utils import torch_distributed_zero_first
 
-# MODIFICATIONS ENABLE
-ENABLE_CUTMIX_MOD = False
 
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -579,14 +577,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
-            
-            # MODIFICATION: Use Cutmix in data augmentation
-            # Apply CutMix augmentation with a 50% probability
-            if ENABLE_CUTMIX_MOD:
-                if random.random() < 0.5:  # Adjust the probability as needed
-                    second_index = random.randint(0, len(self.labels) - 1)  # Get a random second image index
-                    second_img, second_labels = load_image(self, second_index)  # Load the second image and labels
-                    img, labels = cutmix(img, labels, second_img, second_labels, beta=1.0)  # Apply CutMix
             
             #img, labels = self.albumentations(img, labels)
 
@@ -1328,82 +1318,3 @@ def load_segmentations(self, index):
     #print(key)
     # /work/handsomejw66/coco17/
     return self.segs[key]
-
-
-# MODIFICATION: Introduce CutMix data augmentation
-def cutmix(image, label, second_image, second_label, beta=1.0):
-    """
-    Apply CutMix augmentation with proper label adjustment for polygon labels.
-    Args:
-        image (ndarray): The first image.
-        label (list): Labels corresponding to the first image (polygons).
-        second_image (ndarray): The second image to mix with.
-        second_label (list): Labels corresponding to the second image (polygons).
-        beta (float): The Beta distribution parameter for mixing ratio.
-
-    Returns:
-        mixed_image (ndarray): The augmented image with parts from both images.
-        mixed_label (list): Adjusted labels for the mixed image.
-    """
-    # Resize second_image to match image dimensions
-    h, w = image.shape[:2]
-    second_image = cv2.resize(second_image, (w, h))  # Resize to (width, height)
-
-    lam = np.random.beta(beta, beta)
-
-    # Random center point for the CutMix region
-    cx, cy = np.random.randint(w), np.random.randint(h)
-
-    # Calculate the CutMix bounding box
-    bbx1 = np.clip(cx - int(w * np.sqrt(1 - lam)), 0, w)
-    bby1 = np.clip(cy - int(h * np.sqrt(1 - lam)), 0, h)
-    bbx2 = np.clip(cx + int(w * np.sqrt(1 - lam)), 0, w)
-    bby2 = np.clip(cy + int(h * np.sqrt(1 - lam)), 0, h)
-
-    # Mix the images
-    mixed_image = image.copy()
-    mixed_image[bby1:bby2, bbx1:bbx2, :] = second_image[bby1:bby2, bbx1:bbx2, :]
-
-    # Adjust labels for both images
-    mixed_label = []
-
-    # Retain labels from the first image
-    for obj in label:
-        class_id = obj[0]
-        polygon = np.array(obj[1:]).reshape(-1, 2)
-
-        # Compute bounding box
-        x_min, y_min = polygon.min(axis=0)
-        x_max, y_max = polygon.max(axis=0)
-
-        # Check if the bounding box is outside the CutMix region
-        if x_max < bbx1 / w or x_min > bbx2 / w or y_max < bby1 / h or y_min > bby2 / h:
-            mixed_label.append(obj)
-
-    # Adjust and retain labels from the second image
-    for obj in second_label:
-        class_id = obj[0]
-        polygon = np.array(obj[1:]).reshape(-1, 2)
-
-        # Compute bounding box
-        x_min, y_min = polygon.min(axis=0)
-        x_max, y_max = polygon.max(axis=0)
-
-        # Clip bounding box coordinates to the CutMix region
-        x_min = max(x_min, bbx1 / w)
-        x_max = min(x_max, bbx2 / w)
-        y_min = max(y_min, bby1 / h)
-        y_max = min(y_max, bby2 / h)
-
-        if x_min < x_max and y_min < y_max:  # If the bounding box is valid
-            new_polygon = polygon.copy()
-
-            # Clip polygon coordinates to the CutMix region
-            new_polygon[:, 0] = np.clip(new_polygon[:, 0], bbx1 / w, bbx2 / w)
-            new_polygon[:, 1] = np.clip(new_polygon[:, 1], bby1 / h, bby2 / h)
-
-            # Flatten the polygon and append the class ID
-            flattened_polygon = new_polygon.flatten().tolist()
-            mixed_label.append([class_id] + flattened_polygon)
-
-    return mixed_image, mixed_label
