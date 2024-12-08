@@ -84,7 +84,7 @@ This guide provides step-by-step instructions for setting up and running our mod
     ```bash
     python train.py --workers 8 --device 0 --batch-size 8 --data data/coco.yaml --img 640 640 --cfg cfg/training/yolov7_ML.yaml --weights '' --name yolov7_modified_train --hyp data/hyp.scratch.p5.yaml --epochs 1
      ```
-   - IMPORTANT: This training run uses a model intialized from scratch, so using a very small dataset over a small number of epochs will produce ~0% accuracy and lable preditions
+   - IMPORTANT: This training run uses a model intialized from scratch, so using a very small dataset over a small number of epochs will produce ~0% accuracy and label predictions
 
 ---
 
