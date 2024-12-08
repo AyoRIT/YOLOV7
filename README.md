@@ -102,7 +102,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 2. To visualize training progress:
    - Use TensorBoard:
      ```bash
-     tensorboard --bind_all --logdir runs/train/ --port 6006
+     tensorboard --bind_all --logdir runs/train/<experiment_name> --port 6006
      ```
 
 3. Testing results are saved in the `runs/test/{experiment_name}` directory:
