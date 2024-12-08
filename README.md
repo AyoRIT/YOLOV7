@@ -22,7 +22,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 ---
 
 ## Step 2: Setting Up the Environment
-1. Install Python 3.8 or higher.
+1. Install Python 3.8 or higher. (This process will require a GPU)
 2. Set up a virtual environment:
    ```bash
    python3 -m venv yolov7_env
@@ -119,7 +119,7 @@ This guide provides step-by-step instructions for setting up and running our mod
 
 ## Notes and Tips
 - **Hardware Requirements**:
-   - For full COCO training, a GPU is recommended.
+   - For full COCO training, a GPU is required.
 
 - **Configuring Training Parameters**:
    - Edit `data/hyp.scratch.p5.yaml` to adjust hyperparameters such as learning rate and augmentation settings.
