@@ -429,83 +429,87 @@ def train(hyp, opt, device, tb_writer=None):
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
 
-            # Multi-scale
+            # Multi-scale training: dynamically resize images during training
             if opt.multi_scale:
-                sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                sf = sz / max(imgs.shape[2:])  # scale factor
+                sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # Random size in range
+                sf = sz / max(imgs.shape[2:])  # Scale factor
                 if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # New shape (adjusted to grid size)
+                    imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)  # Resize images
 
-            # Forward
-            with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
+            # Forward pass through the model
+            with amp.autocast(enabled=cuda):  # Automatic Mixed Precision (AMP) for efficiency
+                pred = model(imgs)  # Get predictions
+                # Compute loss
                 if 'loss_ota' not in hyp or hyp['loss_ota'] == 1:
-                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)
                 else:
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    loss, loss_items = compute_loss(pred, targets.to(device))
+
+                # Scale loss for distributed training or quad learning
                 if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                    loss *= opt.world_size
                 if opt.quad:
                     loss *= 4.
 
-            # Backward
-            scaler.scale(loss).backward()
+            # Backward pass and gradient accumulation
+            scaler.scale(loss).backward()  # Backpropagation
 
-            # Optimize
+            # Optimize when accumulated gradients reach the threshold
             if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
+                scaler.step(optimizer)  # Update model parameters
+                scaler.update()  # Update the scaler for AMP
+                optimizer.zero_grad()  # Reset gradients
                 if ema:
-                    ema.update(model)
+                    ema.update(model)  # Update EMA weights
 
-            # Print
+            # Logging and displaying progress
             if rank in [-1, 0]:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
+                mloss = (mloss * i + loss_items) / (i + 1)  # Update mean loss
+                mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # GPU memory
                 s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
-                pbar.set_description(s)
+                    f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1])  # Format string
+                pbar.set_description(s)  # Update progress bar description
 
-                # Plot
+                # Plot training samples
                 if plots and ni < 10:
-                    f = save_dir / f'train_batch{ni}.jpg'  # filename
+                    f = save_dir / f'train_batch{ni}.jpg'  # File path for plots
                     Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
-                    # if tb_writer:
-                    #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
-                    #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
                 elif plots and ni == 10 and wandb_logger.wandb:
-                    wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
-                                                  save_dir.glob('train*.jpg') if x.exists()]})
+                    wandb_logger.log({
+                        "Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name)
+                                    for x in save_dir.glob('train*.jpg') if x.exists()]
+                    })
 
-            # end batch ------------------------------------------------------------------------------------------------
-        # end epoch ----------------------------------------------------------------------------------------------------
+        # Update learning rate scheduler after every epoch
+        lr = [x['lr'] for x in optimizer.param_groups]  # Get current learning rates
+        scheduler.step()  # Update learning rates
 
-        # Scheduler
-        lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
-        scheduler.step()
-
-        # DDP process 0 or single-GPU
+        # Validate the model (process 0 or single GPU)
         if rank in [-1, 0]:
-            # mAP
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
-            final_epoch = epoch + 1 == epochs
-            if not opt.notest or final_epoch:  # Calculate mAP
+            final_epoch = epoch + 1 == epochs  # Check if this is the last epoch
+
+            # Perform validation and compute metrics if necessary
+            if not opt.notest or final_epoch:
                 wandb_logger.current_epoch = epoch + 1
-                results, maps, times = test.test(data_dict,
-                                                 batch_size=batch_size * 2,
-                                                 imgsz=imgsz_test,
-                                                 model=ema.ema,
-                                                 single_cls=opt.single_cls,
-                                                 dataloader=testloader,
-                                                 save_dir=save_dir,
-                                                 verbose=nc < 50 and final_epoch,
-                                                 plots=plots and final_epoch,
-                                                 wandb_logger=wandb_logger,
-                                                 compute_loss=compute_loss,
-                                                 is_coco=is_coco,
-                                                 v5_metric=opt.v5_metric)
+                results, maps, times = test.test(
+                    data_dict,
+                    batch_size=batch_size * 2,
+                    imgsz=imgsz_test,
+                    model=ema.ema,
+                    single_cls=opt.single_cls,
+                    dataloader=testloader,
+                    save_dir=save_dir,
+                    verbose=nc < 50 and final_epoch,
+                    plots=plots and final_epoch,
+                    wandb_logger=wandb_logger,
+                    compute_loss=compute_loss,
+                    is_coco=is_coco,
+                    v5_metric=opt.v5_metric
+                )
+
+                # Log validation metrics to TensorBoard
                 if tb_writer:
                     tb_writer.add_scalar("Validation/Loss", results[4] + results[5] + results[6], epoch)
                     tb_writer.add_scalar("Validation/Accuracy", results[0], epoch)  # Precision as a proxy for accuracy
@@ -514,57 +518,44 @@ def train(hyp, opt, device, tb_writer=None):
                     tb_writer.add_scalar("Validation/mAP_0.5", results[2], epoch)
                     tb_writer.add_scalar("Validation/mAP_0.5_0.95", results[3], epoch)
 
-            # Write
+            # Save results to file
             with open(results_file, 'a') as f:
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
-            if len(opt.name) and opt.bucket:
-                os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
+                f.write(s + '%10.4g' * 7 % results + '\n')  # Append metrics and validation loss
 
-            # Log
-            tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
-                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                    'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
-                if tb_writer:
-                    tb_writer.add_scalar(tag, x, epoch)  # tensorboard
-                if wandb_logger.wandb:
-                    wandb_logger.log({tag: x})  # W&B
-
-            # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            # Update best fitness based on validation results
+            fi = fitness(np.array(results).reshape(1, -1))  # Compute weighted combination of metrics
             if fi > best_fitness:
-                best_fitness = fi
+                best_fitness = fi  # Update best fitness score
             wandb_logger.end_epoch(best_result=best_fitness == fi)
 
-            # Save model
-            if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
-                ckpt = {'epoch': epoch,
-                        'best_fitness': best_fitness,
-                        'training_results': results_file.read_text(),
-                        'model': deepcopy(model.module if is_parallel(model) else model).half(),
-                        'ema': deepcopy(ema.ema).half(),
-                        'updates': ema.updates,
-                        'optimizer': optimizer.state_dict(),
-                        'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None}
+            # Save model checkpoints
+            if (not opt.nosave) or (final_epoch and not opt.evolve):
+                ckpt = {
+                    'epoch': epoch,
+                    'best_fitness': best_fitness,
+                    'training_results': results_file.read_text(),
+                    'model': deepcopy(model.module if is_parallel(model) else model).half(),
+                    'ema': deepcopy(ema.ema).half(),
+                    'updates': ema.updates,
+                    'optimizer': optimizer.state_dict(),
+                    'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None
+                }
 
-                # Save last, best and delete
+                # Save last and best model checkpoints
                 torch.save(ckpt, last)
                 if best_fitness == fi:
                     torch.save(ckpt, best)
-                if (best_fitness == fi) and (epoch >= 200):
-                    torch.save(ckpt, wdir / 'best_{:03d}.pt'.format(epoch))
+
+                # Save additional checkpoints at specific intervals
                 if epoch == 0:
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
-                elif ((epoch+1) % 25) == 0:
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
-                elif epoch >= (epochs-5):
-                    torch.save(ckpt, wdir / 'epoch_{:03d}.pt'.format(epoch))
+                    torch.save(ckpt, wdir / f'epoch_{epoch:03d}.pt')
+                elif (epoch + 1) % 25 == 0 or epoch >= (epochs - 5):
+                    torch.save(ckpt, wdir / f'epoch_{epoch:03d}.pt')
                 if wandb_logger.wandb:
                     if ((epoch + 1) % opt.save_period == 0 and not final_epoch) and opt.save_period != -1:
-                        wandb_logger.log_model(
-                            last.parent, opt, epoch, fi, best_model=best_fitness == fi)
-                del ckpt
+                        wandb_logger.log_model(last.parent, opt, epoch, fi, best_model=best_fitness == fi)
+
+                del ckpt  # Free memory
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training
