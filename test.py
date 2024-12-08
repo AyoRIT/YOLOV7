@@ -272,122 +272,122 @@ def test(data,
     loss = torch.zeros(3, device=device)  # Initialize loss (box, objectness, class)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []  # Initialize lists for evaluation
 
-    
+    # -----------------------------
+    # Batch Processing Loop
+    # -----------------------------
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
-        img = img.to(device, non_blocking=True)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        targets = targets.to(device)
-        nb, _, height, width = img.shape  # batch size, channels, height, width
+        # Prepare images
+        img = img.to(device, non_blocking=True)  # Move images to device
+        img = img.half() if half else img.float()  # Convert to half-precision if applicable
+        img /= 255.0  # Normalize pixel values to [0, 1]
+        targets = targets.to(device)  # Move targets to device
+        nb, _, height, width = img.shape  # Get image batch dimensions
 
+        # Run model inference
         with torch.no_grad():
-            # Run model
-            t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
-            t0 += time_synchronized() - t
+            t = time_synchronized()  # Start timing
+            out, train_out = model(img, augment=augment)  # Get predictions and training outputs
+            t0 += time_synchronized() - t  # Update inference time
 
-            # Compute loss
+            # Compute training loss if required
             if compute_loss:
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # Add box, obj, cls losses
 
-            # Run NMS
-            targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
-            lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
-            t = time_synchronized()
+            # Perform Non-Maximum Suppression (NMS)
+            targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # Convert to pixel values
+            lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # Hybrid labels
+            t = time_synchronized()  # Start timing
             out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
-            t1 += time_synchronized() - t
+            t1 += time_synchronized() - t  # Update NMS time
 
-        # Statistics per image
+        # Process predictions and ground truth
         for si, pred in enumerate(out):
-            labels = targets[targets[:, 0] == si, 1:]
-            nl = len(labels)
-            tcls = labels[:, 0].tolist() if nl else []  # target class
-            path = Path(paths[si])
-            seen += 1
+            labels = targets[targets[:, 0] == si, 1:]  # Ground truth labels for the current image
+            nl = len(labels)  # Number of labels
+            tcls = labels[:, 0].tolist() if nl else []  # Target classes
+            path = Path(paths[si])  # Image path
+            seen += 1  # Increment the count of processed images
 
-            if len(pred) == 0:
-                if nl:
+            if len(pred) == 0:  # No predictions
+                if nl:  # If ground truth exists
                     stats.append((torch.zeros(0, niou, dtype=torch.bool), torch.Tensor(), torch.Tensor(), tcls))
                 continue
 
-            # Predictions
+            # Scale predictions to original image dimensions
             predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
+            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # Scale to native-space
 
-            # Append to text file
+            # Save predictions to text file
             if save_txt:
-                gn = torch.tensor(shapes[si][0])[[1, 0, 1, 0]]  # normalization gain whwh
+                gn = torch.tensor(shapes[si][0])[[1, 0, 1, 0]]  # Normalization gain (whwh)
                 for *xyxy, conf, cls in predn.tolist():
-                    xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                    line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                    xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # Normalize to xywh
+                    line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # Format label
                     with open(save_dir / 'labels' / (path.stem + '.txt'), 'a') as f:
                         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-            # W&B logging - Media Panel Plots
-            if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:  # Check for test operation
+            # W&B logging for bounding boxes
+            if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:
                 if wandb_logger.current_epoch % wandb_logger.bbox_interval == 0:
                     box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
                                  "class_id": int(cls),
                                  "box_caption": "%s %.3f" % (names[cls], conf),
                                  "scores": {"class_score": conf},
                                  "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
-                    boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
+                    boxes = {"predictions": {"box_data": box_data, "class_labels": names}}
                     wandb_images.append(wandb_logger.wandb.Image(img[si], boxes=boxes, caption=path.name))
-            wandb_logger.log_training_progress(predn, path, names) if wandb_logger and wandb_logger.wandb_run else None
 
-            # Append to pycocotools JSON dictionary
+            # Save predictions to COCO JSON format
             if save_json:
-                # [{"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}, ...
                 image_id = int(path.stem) if path.stem.isnumeric() else path.stem
-                box = xyxy2xywh(predn[:, :4])  # xywh
-                box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
+                box = xyxy2xywh(predn[:, :4])  # Convert to xywh format
+                box[:, :2] -= box[:, 2:] / 2  # Convert center to top-left corner
                 for p, b in zip(pred.tolist(), box.tolist()):
                     jdict.append({'image_id': image_id,
                                   'category_id': coco91class[int(p[5])] if is_coco else int(p[5]),
                                   'bbox': [round(x, 3) for x in b],
                                   'score': round(p[4], 5)})
 
-            # Assign all predictions as incorrect
+            # Assign predictions as incorrect initially
             correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool, device=device)
-            if nl:
-                detected = []  # target indices
-                tcls_tensor = labels[:, 0]
+            if nl:  # If ground truth exists
+                detected = []  # Detected target indices
+                tcls_tensor = labels[:, 0]  # Ground truth classes
 
-                # target boxes
-                tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
+                # Scale ground truth boxes to image space
+                tbox = xywh2xyxy(labels[:, 1:5])  # Convert to xyxy format
+                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # Scale to native-space labels
+
+                # Process confusion matrix if enabled
                 if plots:
                     confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
 
-                # Per target class
+                # Process predictions for each class
                 for cls in torch.unique(tcls_tensor):
-                    ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # prediction indices
-                    pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # target indices
+                    ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # Ground truth indices
+                    pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # Prediction indices
 
-                    # Search for detections
-                    if pi.shape[0]:
-                        # Prediction to target ious
-                        ious, i = box_iou(predn[pi, :4], tbox[ti]).max(1)  # best ious, indices
-
-                        # Append detections
+                    # Match predictions to targets
+                    if pi.shape[0]:  # If predictions exist
+                        ious, i = box_iou(predn[pi, :4], tbox[ti]).max(1)  # Compute IoUs and get best match
                         detected_set = set()
-                        for j in (ious > iouv[0]).nonzero(as_tuple=False):
-                            d = ti[i[j]]  # detected target
-                            if d.item() not in detected_set:
+                        for j in (ious > iouv[0]).nonzero(as_tuple=False):  # Check IoUs above threshold
+                            d = ti[i[j]]  # Target index
+                            if d.item() not in detected_set:  # Ensure unique detection
                                 detected_set.add(d.item())
                                 detected.append(d)
-                                correct[pi[j]] = ious[j] > iouv  # iou_thres is 1xn
-                                if len(detected) == nl:  # all targets already located in image
+                                correct[pi[j]] = ious[j] > iouv  # Mark prediction as correct
+                                if len(detected) == nl:  # All targets detected
                                     break
 
-            # Append statistics (correct, conf, pcls, tcls)
+            # Append statistics for this image
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
-        # Plot images
+        # Generate and save visualizations
         if plots and batch_i < 3:
-            f = save_dir / f'test_batch{batch_i}_labels.jpg'  # labels
+            f = save_dir / f'test_batch{batch_i}_labels.jpg'  # Labels
             Thread(target=plot_images, args=(img, targets, paths, f, names), daemon=True).start()
-            f = save_dir / f'test_batch{batch_i}_pred.jpg'  # predictions
+            f = save_dir / f'test_batch{batch_i}_pred.jpg'  # Predictions
             Thread(target=plot_images, args=(img, output_to_target(out), paths, f, names), daemon=True).start()
 
     # Compute statistics
