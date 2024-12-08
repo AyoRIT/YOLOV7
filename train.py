@@ -1,40 +1,92 @@
+"""
+File: train.py
+Description:
+    This script is a core training module for a YOLO-based object detection model. It handles 
+    data preparation, model initialization, loss computation, and optimization across 
+    distributed or single-node systems. Additional features include logging, automatic anchor 
+    adjustment, and integration with TensorBoard and W&B for tracking experiments.
+
+Author: Daniel Gebura
+Date: 12/5/2024
+"""
+
+# -----------------------------
+# Import Required Libraries
+# -----------------------------
+
 import argparse
 import logging
 import math
 import os
+from pathlib import Path
 import random
 import time
 from copy import deepcopy
-from pathlib import Path
 from threading import Thread
-
 import numpy as np
-import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import torch.optim.lr_scheduler as lr_scheduler
-import torch.utils.data
 import yaml
+
+# torch: Core library for building and training deep learning models
+import torch.distributed as dist  # Manages distributed training across multiple devices
+import torch.nn as nn  # Provides modules and layers for constructing models
+import torch.nn.functional as F  # Contains functions for operations on tensors
+import torch.optim as optim  # Optimization algorithms for training
+import torch.optim.lr_scheduler as lr_scheduler  # Learning rate scheduling during training
+import torch.utils.data  # Utilities for data loading and batching
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import test  # import test.py to get mAP after each epoch
-from models.experimental import attempt_load
-from models.yolo import Model
-from utils.autoanchor import check_anchors
-from utils.datasets import create_dataloader
-from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
-    fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr
-from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss, ComputeLossOTA
-from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
-from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
-from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+# Local modules and utilities
+import test  # Imports test.py for computing mean average precision (mAP) after each epoch
+from models.experimental import attempt_load  # For loading experimental model architectures
+from models.yolo import Model  # YOLO model definition
+from utils.autoanchor import check_anchors  # Checks and adjusts anchor sizes for datasets
+from utils.datasets import create_dataloader  # Data loading utilities for training and validation
+from utils.general import (  # General utilities for various training tasks
+    labels_to_class_weights,
+    increment_path,
+    labels_to_image_weights,
+    init_seeds,
+    fitness,
+    strip_optimizer,
+    get_latest_run,
+    check_dataset,
+    check_file,
+    check_git_status,
+    check_img_size,
+    check_requirements,
+    print_mutation,
+    set_logging,
+    one_cycle,
+    colorstr
+)
+from utils.google_utils import attempt_download  # Download utilities for fetching models or data
+from utils.loss import ComputeLoss, ComputeLossOTA  # Loss computation for YOLO
+from utils.plots import (  # Functions for creating visualizations like images and training metrics
+    plot_images,
+    plot_labels,
+    plot_results,
+    plot_evolution
+)
+from utils.torch_utils import (  # Torch-specific helper functions
+    ModelEMA,
+    select_device,
+    intersect_dicts,
+    torch_distributed_zero_first,
+    is_parallel
+)
+from utils.wandb_logging.wandb_utils import (  # Utilities for logging to Weights & Biases
+    WandbLogger,
+    check_wandb_resume
+)
 
+# -----------------------------
+# Global Logger Initialization
+# -----------------------------
+
+# Configures the global logger for the training script
 logger = logging.getLogger(__name__)
 
 
