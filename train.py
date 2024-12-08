@@ -320,105 +320,111 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Using SyncBatchNorm()')
 
 
-    # DataLoader for training
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
-                                            world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # Max label class
+    # Create dataloaders for training and validation
+    dataloader, dataset = create_dataloader(
+        train_path, imgsz, batch_size, gs, opt,
+        hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
+        world_size=opt.world_size, workers=opt.workers,
+        image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: ')
+    )
+    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # Maximum label class
     nb = len(dataloader)  # Number of batches
-    assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {opt.data}.'
+    assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {opt.data}. Possible class labels are 0-{nc - 1}'
 
-    # Main process setups (rank -1 or 0)
+    # Set up validation dataloader for process 0
     if rank in [-1, 0]:
-        # Validation DataLoader
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,
-                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
-                                       world_size=opt.world_size, workers=opt.workers,
-                                       pad=0.5, prefix=colorstr('val: '))[0]
-        # Plot and analyze labels
+        testloader = create_dataloader(
+            test_path, imgsz_test, batch_size * 2, gs, opt,
+            hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
+            world_size=opt.world_size, workers=opt.workers,
+            pad=0.5, prefix=colorstr('val: ')
+        )[0]
+
+        # Initialize plotting and labels if not resuming
         if not opt.resume:
-            labels = np.concatenate(dataset.labels, 0)
-            c = torch.tensor(labels[:, 0])  # Classes
+            labels = np.concatenate(dataset.labels, 0)  # Collect all labels
+            c = torch.tensor(labels[:, 0])  # Extract class labels
             if plots:
                 if tb_writer:
-                    tb_writer.add_histogram('classes', c, 0)  # Log class histogram
-            # Anchor checking and adjustment
+                    tb_writer.add_histogram('classes', c, 0)  # Log class histogram to TensorBoard
+
+            # Check and adjust anchors if necessary
             if not opt.noautoanchor:
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # Reduce anchor precision
+            model.half().float()  # Pre-reduce anchor precision
 
-    # DistributedDataParallel (DDP) mode for distributed training
+    # Enable DistributedDataParallel (DDP) mode if applicable
     if cuda and rank != -1:
-        model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
-                    find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
+        model = DDP(
+            model, device_ids=[opt.local_rank], output_device=opt.local_rank,
+            find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules())
+        )
 
-    # Update model parameters
-    hyp['box'] *= 3. / model.model[-1].nl  # Adjust box loss scale
-    hyp['cls'] *= nc / 80. * 3. / model.model[-1].nl  # Adjust class loss scale
-    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / model.model[-1].nl  # Adjust object loss scale
-    hyp['label_smoothing'] = opt.label_smoothing  # Set label smoothing
-    model.nc = nc  # Number of classes
-    model.hyp = hyp  # Attach hyperparameters
-    model.gr = 1.0  # Set IoU loss ratio
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # Set class weights
+    # Adjust hyperparameters for multi-scale and multiple layers
+    hyp['box'] *= 3. / model.model[-1].nl  # Scale box loss by number of layers
+    hyp['cls'] *= nc / 80. * 3. / model.model[-1].nl  # Scale class loss by number of classes and layers
+    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / model.model[-1].nl  # Scale object loss by image size and layers
+    hyp['label_smoothing'] = opt.label_smoothing  # Apply label smoothing
+    model.nc = nc  # Attach number of classes to the model
+    model.hyp = hyp  # Attach hyperparameters to the model
+    model.gr = 1.0  # IoU loss ratio (obj_loss = 1.0 or IoU)
+    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # Attach class weights
     model.names = names  # Attach class names
 
-    # Start training
-    t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
-    # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
-    maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
-    scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
-    compute_loss_ota = ComputeLossOTA(model)  # init loss class
-    compute_loss = ComputeLoss(model)  # init loss class
+    # Start the training process
+    t0 = time.time()  # Record start time
+    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # Number of warmup iterations
+    maps = np.zeros(nc)  # Initialize mAP per class
+    results = (0, 0, 0, 0, 0, 0, 0)  # Initialize training results
+    scheduler.last_epoch = start_epoch - 1  # Sync scheduler with the start epoch
+    scaler = amp.GradScaler(enabled=cuda)  # Initialize gradient scaler for AMP
+    compute_loss_ota = ComputeLossOTA(model)  # Initialize loss computation for OTA
+    compute_loss = ComputeLoss(model)  # Initialize standard loss computation
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
-    torch.save(model, wdir / 'init.pt')
-    for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        model.train()
 
-        # Update image weights (optional)
+    # Save initial model checkpoint
+    torch.save(model, wdir / 'init.pt')
+
+    # Epoch loop
+    for epoch in range(start_epoch, epochs):
+        model.train()  # Set model to training mode
+
+        # Update image weights for class balancing if enabled
         if opt.image_weights:
-            # Generate indices
-            if rank in [-1, 0]:
-                cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-                iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-                dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
-            # Broadcast if DDP
-            if rank != -1:
+            if rank in [-1, 0]:  # Main process
+                cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # Compute class weights
+                iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # Compute image weights
+                dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # Weighted random sampling
+            if rank != -1:  # Broadcast indices for DDP
                 indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
                 dist.broadcast(indices, 0)
                 if rank != 0:
                     dataset.indices = indices.cpu().numpy()
 
-        # Update mosaic border
-        # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
-        # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
-
-        mloss = torch.zeros(4, device=device)  # mean losses
+        mloss = torch.zeros(4, device=device)  # Initialize mean losses
         if rank != -1:
-            dataloader.sampler.set_epoch(epoch)
-        pbar = enumerate(dataloader)
+            dataloader.sampler.set_epoch(epoch)  # Update sampler for DDP
+        pbar = enumerate(dataloader)  # Initialize progress bar
         logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
-        if rank in [-1, 0]:
-            pbar = tqdm(pbar, total=nb)  # progress bar
-        optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
-            ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
-            # Warmup
+        # Display progress bar for the main process
+        if rank in [-1, 0]:
+            pbar = tqdm(pbar, total=nb)
+
+        optimizer.zero_grad()  # Reset gradients
+
+        for i, (imgs, targets, paths, _) in pbar:  # Iterate over batches
+            ni = i + nb * epoch  # Number of integrated batches
+            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # Normalize images to [0, 1]
+
+            # Warmup phase for dynamic hyperparameters
             if ni <= nw:
-                xi = [0, nw]  # x interp
-                # model.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
+                xi = [0, nw]  # Warmup interval
                 accumulate = max(1, np.interp(ni, xi, [1, nbs / total_batch_size]).round())
                 for j, x in enumerate(optimizer.param_groups):
-                    # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                     x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 2 else 0.0, x['initial_lr'] * lf(epoch)])
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
